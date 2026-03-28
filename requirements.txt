@@ -1,0 +1,4 @@
+## Runtime dependencies for ascii_map_renderer
+numpy
+pillow
+requests
