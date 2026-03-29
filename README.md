@@ -1,5 +1,7 @@
 # ASCII Map Renderer
 
+![Screenshot](ascii_map_renderer.png)
+
 `ascii_map_renderer.py` renders the prefecture, city, and ward boundaries that intersect the visible map range, with the prefecture line brightest, the city line medium, and the ward line dimmest, over a muted JMA rain-radar background. The default center is Tokyo.
 
 ## Run
