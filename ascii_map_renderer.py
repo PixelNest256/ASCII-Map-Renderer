@@ -2,35 +2,41 @@
 """Render prefecture, city, and ward boundaries with rain radar as terminal text art."""
 
 from __future__ import annotations
-
 import argparse
-import io
+from datetime import datetime
+from dataclasses import dataclass, field
+from functools import lru_cache
 import hashlib
+import io
 import json
 import math
 import os
+from pathlib import Path
+from shutil import get_terminal_size
 import string
 import sys
 import time
-from datetime import datetime
-from dataclasses import dataclass
-from functools import lru_cache
-from pathlib import Path
-from shutil import get_terminal_size
-from typing import Dict, List, Tuple
+from typing import Any, Dict, List, Tuple, TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
-np = None
-requests = None
-Image = None
-ImageDraw = None
-ImageFont = None
+if TYPE_CHECKING:
+    import requests as requests_pkg
+    from PIL import ImageDraw as PILImageDraw_pkg
+    from PIL import ImageFont as PILImageFont_pkg
+    from PIL.Image import Image as PILImageType
+
+# 実行時に遅延ロードするモジュール(型はAnyにしてOptional member accessを抑制)
+np: Any = None
+requests: Any = None
+Image: Any = None
+ImageDraw: Any = None
+ImageFont: Any = None
 
 
 def load_runtime_dependencies() -> None:
     global np, requests, Image, ImageDraw, ImageFont
 
-    if np is not None and requests is not None and Image is not None and ImageDraw is not None and ImageFont is not None:
+    if all(module is not None for module in (np, requests, Image, ImageDraw, ImageFont)):
         return
 
     try:
@@ -130,11 +136,7 @@ class RadarSampling:
 @dataclass
 class RadarState:
     target: Tuple[str, str] | None = None
-    tiles: Dict[Tuple[int, int], Image.Image] = None
-
-    def __post_init__(self) -> None:
-        if self.tiles is None:
-            self.tiles = {}
+    tiles: Dict[Tuple[int, int], "PILImageType"] = field(default_factory=dict)
 
 
 @dataclass(frozen=True)
@@ -154,7 +156,8 @@ class CurrentWeatherSnapshot:
     updated_at: datetime
 
 
-def build_session() -> requests.Session:
+def build_session() -> "requests_pkg.Session":
+    load_runtime_dependencies()
     session = requests.Session()
     session.headers.update(
         {
@@ -468,7 +471,7 @@ def rasterize_rings_to_canvas(
     scale_m: float,
     tile_h: int,
     ground_aspect: float,
-) -> Image.Image:
+) -> PILImageType:
     canvas_w = cols * TILE_W
     canvas_h = rows * tile_h
     img = Image.new("L", (canvas_w, canvas_h), 0)
@@ -494,7 +497,7 @@ def rasterize_rings_to_canvas(
 
 
 def draw_polyline_to_canvas(
-    draw: ImageDraw.ImageDraw,
+    draw: PILImageDraw_pkg.ImageDraw,
     points: List[Point],
     lat0: float,
     lon0: float,
@@ -529,7 +532,7 @@ def rasterize_features_to_canvas(
     scale_m: float,
     tile_h: int,
     ground_aspect: float,
-) -> Image.Image:
+) -> PILImageType:
     canvas_w = cols * TILE_W
     canvas_h = rows * tile_h
     img = Image.new("L", (canvas_w, canvas_h), 0)
@@ -541,7 +544,7 @@ def rasterize_features_to_canvas(
 
 
 def fetch_admin_boundaries_in_bbox(
-    session: requests.Session,
+    session: requests_pkg.Session,
     cache_dir: Path,
     lat: float,
     lon: float,
@@ -730,7 +733,7 @@ def compass_from_degrees(degrees: float | None, wind_speed_ms: float) -> str:
     return directions[idx]
 
 
-def fetch_current_weather(session: requests.Session, lat: float, lon: float) -> CurrentWeatherSnapshot | None:
+def fetch_current_weather(session: requests_pkg.Session, lat: float, lon: float) -> CurrentWeatherSnapshot | None:
     url = "https://api.open-meteo.com/v1/jma"
     params = {
         "latitude": lat,
@@ -799,9 +802,10 @@ def ansi_bg_rgb(rgb: Tuple[int, int, int]) -> str:
 
 def mix_rgb(base: Tuple[int, int, int], color: Tuple[int, int, int], factor: float) -> Tuple[int, int, int]:
     factor = max(0.0, min(1.0, factor))
-    return tuple(
-        int(round(base[i] + (color[i] - base[i]) * factor))
-        for i in range(3)
+    return (
+        int(round(base[0] + (color[0] - base[0]) * factor)),
+        int(round(base[1] + (color[1] - base[1]) * factor)),
+        int(round(base[2] + (color[2] - base[2]) * factor)),
     )
 
 
@@ -818,7 +822,7 @@ def radar_bg_style_from_pixel(pixel: Tuple[int, int, int, int], use_color: bool)
     return ansi_bg_rgb(mixed)
 
 
-def load_radar_target_time(session: requests.Session) -> Tuple[str, str] | None:
+def load_radar_target_time(session: requests_pkg.Session) -> Tuple[str, str] | None:
     try:
         resp = session.get(RADAR_TARGET_URL, timeout=60)
         resp.raise_for_status()
@@ -836,13 +840,13 @@ def load_radar_target_time(session: requests.Session) -> Tuple[str, str] | None:
 
 
 def load_radar_tile(
-    session: requests.Session,
+    session: requests_pkg.Session,
     basetime: str,
     validtime: str,
     zoom: int,
     x: int,
     y: int,
-) -> Image.Image | None:
+) -> PILImageType | None:
     url = RADAR_TILE_URL.format(
         basetime=basetime,
         validtime=validtime,
@@ -863,7 +867,7 @@ def load_radar_tile(
 
 
 def prefetch_radar_tiles(
-    session: requests.Session,
+    session: requests_pkg.Session,
     basetime: str,
     validtime: str,
     zoom: int,
@@ -871,8 +875,8 @@ def prefetch_radar_tiles(
     x_max: int,
     y_min: int,
     y_max: int,
-) -> Dict[Tuple[int, int], Image.Image]:
-    tiles: Dict[Tuple[int, int], Image.Image] = {}
+) -> Dict[Tuple[int, int], PILImageType]:
+    tiles: Dict[Tuple[int, int], PILImageType] = {}
     for tile_y in range(y_min, y_max + 1):
         for tile_x in range(x_min, x_max + 1):
             tile = load_radar_tile(session, basetime, validtime, zoom, tile_x, tile_y)
@@ -882,7 +886,7 @@ def prefetch_radar_tiles(
 
 
 def build_radar_background(
-    session: requests.Session,
+    session: requests_pkg.Session,
     sampling: RadarSampling,
     radar_state: RadarState,
     use_color: bool,
@@ -928,13 +932,20 @@ def build_radar_background(
                 backgrounds[row_idx][col_idx] = fill
                 continue
 
-            backgrounds[row_idx][col_idx] = radar_bg_style_from_pixel(tile.getpixel((sample.px, sample.py)), True)
+            pixel = tile.getpixel((sample.px, sample.py))
+            if isinstance(pixel, tuple) and len(pixel) == 4:
+                rgba = (int(pixel[0]), int(pixel[1]), int(pixel[2]), int(pixel[3]))
+            else:
+                rgba = (0, 0, 0, 0)
+            backgrounds[row_idx][col_idx] = radar_bg_style_from_pixel(rgba, True)
 
+    if radar_state.target is None:
+        return backgrounds, "Radar: unavailable"
     basetime, validtime = radar_state.target
     return backgrounds, f"Radar: hrpns {basetime}/{validtime} z{RADAR_ZOOM}"
 
 
-def extract_visible_tiles(img: Image.Image, cols: int, rows: int, tile_h: int) -> np.ndarray:
+def extract_visible_tiles(img: PILImageType, cols: int, rows: int, tile_h: int) -> Any:
     arr = np.asarray(img, dtype=np.uint8)
     tiles = np.empty((rows, cols), dtype=object)
     for r in range(rows):
@@ -984,7 +995,7 @@ def resolve_font_path() -> Path | None:
     return None
 
 
-def load_monospace_font() -> ImageFont.FreeTypeFont | ImageFont.ImageFont:
+def load_monospace_font() -> PILImageFont_pkg.FreeTypeFont | PILImageFont_pkg.ImageFont:
     font_path = resolve_font_path()
     if font_path is None:
         return ImageFont.load_default()
@@ -1024,7 +1035,7 @@ def build_radar_sampling(
     return RadarSampling(cells=cells, tile_bounds=tile_bounds)
 
 
-def build_glyph_atlas(font: ImageFont.ImageFont, tile_h: int) -> Tuple[List[str], np.ndarray]:
+def build_glyph_atlas(font: Any, tile_h: int) -> Tuple[List[str], Any]:
     box_drawing = list("─│┌┐└┘├┤┬┴┼╭╮╯╰╱╲╳")
     ascii_line = list("-|/\\+=_*^~.:")
     digits = list(string.digits)
@@ -1069,9 +1080,9 @@ def glyph_bias(ch: str) -> float:
 
 
 def choose_glyph_for_tile(
-    tile: np.ndarray,
+    tile: Any,
     atlas_chars: List[str],
-    atlas_stack: np.ndarray,
+    atlas_stack: Any,
     cache: Dict[bytes, str],
 ) -> str:
     if tile.max() == 0:
@@ -1085,16 +1096,16 @@ def choose_glyph_for_tile(
     target = tile.astype(np.float32) / 255.0
     diff = atlas_stack - target[None, :, :]
     scores = np.mean(diff * diff, axis=(1, 2))
-    #scores = scores + np.array([glyph_bias(ch) for ch in atlas_chars], dtype=np.float32)
+    # scores = scores + np.array([glyph_bias(ch) for ch in atlas_chars], dtype=np.float32)
     glyph = atlas_chars[int(np.argmin(scores))]
     cache[key] = glyph
     return glyph
 
 
 def render_layer(
-    img: Image.Image,
+    img: PILImageType,
     atlas_chars: List[str],
-    atlas_stack: np.ndarray,
+    atlas_stack: Any,
     cols: int,
     rows: int,
     tile_h: int,
